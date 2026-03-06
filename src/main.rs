@@ -1,5 +1,6 @@
 use std::time;
 use std::sync::{Arc, Mutex};
+use arboard::Clipboard;
 
 fn main() {
     let interval_time = time::Duration::from_secs(2);
@@ -13,12 +14,15 @@ fn main() {
     // We clone so that the thread can always have a safe copy of the array, in case anything happens to the one in main
     let clipboard_history_clone = clipboard_history.clone();
     std::thread::spawn(move || {
+        let mut my_clipboard = Clipboard::new().unwrap();
+
         loop {
             std::thread::sleep(interval_time);
-    
+            
             let mut vec = clipboard_history_clone.lock().unwrap();
-            let str: String = "value".to_string();
-            vec.push(str);
+            if let Ok(text) = my_clipboard.get_text() {
+                vec.push(text);
+            }
         }
     });
     
