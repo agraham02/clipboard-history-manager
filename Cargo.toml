@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 arboard = "3"
+tray-icon = "0.21.3"
+winit = "0.30.13"
