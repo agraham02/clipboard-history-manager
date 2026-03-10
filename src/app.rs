@@ -39,6 +39,12 @@ pub struct App {
     /// restore focus (and its fullscreen Space) when we close.
     #[cfg(target_os = "macos")]
     previous_app: Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>>,
+    /// Original NSWindow ObjC class pointer, saved before swapping to NSPanel.
+    #[cfg(target_os = "macos")]
+    original_window_class: Option<*const std::ffi::c_void>,
+    /// Original window style mask bits, saved before adding NonactivatingPanel.
+    #[cfg(target_os = "macos")]
+    original_style_mask_bits: Option<usize>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -78,6 +84,10 @@ impl App {
             opened_at: None,
             #[cfg(target_os = "macos")]
             previous_app: None,
+            #[cfg(target_os = "macos")]
+            original_window_class: None,
+            #[cfg(target_os = "macos")]
+            original_style_mask_bits: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
@@ -144,7 +154,7 @@ impl App {
             }
         };
 
-        // On macOS, allow the window to appear over fullscreen spaces.
+        // On macOS, swap the window to an NSPanel so it overlays fullscreen apps.
         #[cfg(target_os = "macos")]
         {
             use winit::raw_window_handle::HasWindowHandle;
@@ -152,24 +162,46 @@ impl App {
             if let Ok(handle) = window.window_handle() {
                 if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
                     unsafe {
-                        use objc2_app_kit::{NSApplication, NSView, NSWindowCollectionBehavior};
+                        use objc2_app_kit::{
+                            NSApplication, NSView,
+                            NSWindowCollectionBehavior, NSWindowStyleMask,
+                        };
+                        use objc2::runtime::{AnyClass, AnyObject};
                         use objc2::MainThreadMarker;
 
                         let ns_view_ptr = appkit.ns_view.as_ptr() as *mut NSView;
                         let ns_view = &*ns_view_ptr;
                         if let Some(ns_window) = ns_view.window() {
-                            // MoveToActiveSpace: moves the window TO the user's
-                            // current Space (including fullscreen ones) instead
-                            // of switching Spaces back to the desktop.
-                            // FullScreenAuxiliary: allows coexistence with a
-                            // fullscreen window on the same Space.
-                            ns_window.setCollectionBehavior(
-                                NSWindowCollectionBehavior::MoveToActiveSpace
-                                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+                            // Save the original style mask so we can restore
+                            // it before dropping (winit expects the mask it set).
+                            let orig_mask = ns_window.styleMask();
+                            self.original_style_mask_bits = Some(std::mem::transmute::<NSWindowStyleMask, usize>(orig_mask));
+
+                            // Swap the ObjC class from NSWindow to NSPanel.
+                            // NSPanel is the only window type that can float
+                            // over fullscreen Spaces without switching away.
+                            let any_obj: &AnyObject =
+                                &*(&*ns_window as *const _ as *const AnyObject);
+                            if let Some(panel_class) = AnyClass::get(c"NSPanel") {
+                                let orig_class = AnyObject::set_class(any_obj, panel_class);
+                                self.original_window_class = Some(
+                                    orig_class as *const AnyClass
+                                        as *const std::ffi::c_void,
+                                );
+                            }
+
+                            // NonactivatingPanel tells macOS this panel
+                            // should not cause a Space switch on appearance.
+                            ns_window.setStyleMask(
+                                orig_mask | NSWindowStyleMask::NonactivatingPanel,
                             );
-                            // PopUpMenu level (101) floats above fullscreen apps.
+
+                            ns_window.setCollectionBehavior(
+                                NSWindowCollectionBehavior::CanJoinAllSpaces
+                                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                                    | NSWindowCollectionBehavior::Stationary,
+                            );
                             ns_window.setLevel(101);
-                            // Prevent the window from hiding when another app activates.
                             ns_window.setHidesOnDeactivate(false);
                             ns_window.makeKeyAndOrderFront(None);
                         }
@@ -222,6 +254,47 @@ impl App {
     }
 
     fn close_popup(&mut self) {
+        // On macOS, restore the original NSWindow class before winit drops
+        // the window.  orderOut first so no delegate callbacks fire during
+        // the class swap.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(window) = &self.popup_window {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = window.window_handle() {
+                    if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
+                        unsafe {
+                            use objc2_app_kit::{NSView, NSWindowStyleMask};
+                            use objc2::runtime::{AnyClass, AnyObject};
+
+                            let ns_view = &*(appkit.ns_view.as_ptr() as *mut NSView);
+                            if let Some(ns_window) = ns_view.window() {
+                                // 1. Silently remove from screen (no
+                                //    windowShouldClose / windowWillClose).
+                                ns_window.orderOut(None);
+
+                                // 2. Restore original style mask.
+                                if let Some(bits) = self.original_style_mask_bits.take() {
+                                    let mask: NSWindowStyleMask =
+                                        std::mem::transmute::<usize, NSWindowStyleMask>(bits);
+                                    ns_window.setStyleMask(mask);
+                                }
+
+                                // 3. Swap class back to NSWindow.
+                                if let Some(orig_cls) = self.original_window_class.take() {
+                                    let any_obj: &AnyObject =
+                                        &*(&*ns_window as *const _ as *const AnyObject);
+                                    let cls_ref: &AnyClass =
+                                        &*(orig_cls as *const AnyClass);
+                                    AnyObject::set_class(any_obj, cls_ref);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.popup_window = None;
         self.opened_at = None;
         self.egui_state = None;
