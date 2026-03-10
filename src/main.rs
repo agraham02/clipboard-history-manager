@@ -27,7 +27,7 @@ fn main() {
         Duration::from_secs(POLL_INTERVAL_SECONDS),
     );
 
-    // Register global hotkey (Cmd+Option+V).
+    // Register global hotkey (Cmd+Shift+V).
     let Some((_hotkey_manager, hotkey)) = hotkey::setup_hotkey() else {
         eprintln!("Cannot start without global hotkey support");
         return;

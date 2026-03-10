@@ -17,6 +17,7 @@ use crate::tray::TrayState;
 use crate::ui::PickerState;
 
 const HOTKEY_DEBOUNCE_MS: u128 = 250;
+const FOCUS_GRACE_MS: u128 = 400;
 const POPUP_WIDTH: u32 = 760;
 const POPUP_HEIGHT: u32 = 480;
 
@@ -28,18 +29,29 @@ pub struct App {
     _hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
     last_hotkey_at: Option<Instant>,
 
-    // Popup window + egui state
+    // Long-lived GPU context (survives across open/close)
+    gpu: Option<GpuContext>,
+
+    // Popup window + per-window state
     popup_window: Option<Arc<Window>>,
+    opened_at: Option<Instant>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
-    wgpu_state: Option<WgpuState>,
+    surface_state: Option<SurfaceState>,
     picker_state: PickerState,
 }
 
-struct WgpuState {
+/// Long-lived GPU resources cached across popup open/close cycles.
+struct GpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+}
+
+/// Per-window surface state, recreated each time the popup opens.
+struct SurfaceState {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
 }
@@ -57,11 +69,13 @@ impl App {
             open_picker_hotkey: hotkey,
             _hotkey_manager: None,
             last_hotkey_at: None,
+            gpu: None,
             popup_window: None,
+            opened_at: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
-            wgpu_state: None,
+            surface_state: None,
             picker_state: PickerState::new(),
         }
     }
@@ -70,10 +84,35 @@ impl App {
         self._hotkey_manager = Some(manager);
     }
 
+    fn ensure_gpu(&mut self) {
+        if self.gpu.is_some() {
+            return;
+        }
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            ..Default::default()
+        }))
+        .expect("No suitable GPU adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("egui_device"),
+                ..Default::default()
+            },
+            None,
+        ))
+        .expect("Failed to create wgpu device");
+        self.gpu = Some(GpuContext { instance, adapter, device, queue });
+    }
+
     fn open_popup(&mut self, event_loop: &ActiveEventLoop) {
         if self.popup_window.is_some() {
             return;
         }
+
+        self.ensure_gpu();
 
         let attrs = Window::default_attributes()
             .with_title("Clipboard History")
@@ -109,13 +148,15 @@ impl App {
                                 NSWindowCollectionBehavior::CanJoinAllSpaces
                                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
                             );
+                            // Force the window to become key and front-most.
+                            ns_window.makeKeyAndOrderFront(None);
                         }
 
-                        // Activate the app so the window appears in front.
-                        // We're on the main thread (ApplicationHandler callback).
+                        // Activate the app so it comes to the foreground reliably.
                         let mtm = MainThreadMarker::new_unchecked();
                         let app = NSApplication::sharedApplication(mtm);
-                        app.activate();
+                        #[allow(deprecated)]
+                        app.activateIgnoringOtherApps(true);
                     }
                 }
             }
@@ -123,36 +164,17 @@ impl App {
         // Ordering the window to front helps when called from a background process.
         window.focus_window();
 
-        // Initialize wgpu surface
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("No suitable GPU adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("egui_device"),
-                ..Default::default()
-            },
-            None,
-        ))
-        .expect("Failed to create wgpu device");
+        // Create surface for this window (GPU context already cached)
+        let gpu = self.gpu.as_ref().unwrap();
+        let surface = gpu.instance.create_surface(window.clone()).unwrap();
 
         let size = window.inner_size();
         let surface_config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
             .expect("Surface not supported");
-        surface.configure(&device, &surface_config);
+        surface.configure(&gpu.device, &surface_config);
 
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_config.format, None, 1, false);
+        let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, surface_config.format, None, 1, false);
 
         // Fresh context each open so the renderer and context texture state stay in sync.
         self.egui_ctx = egui::Context::default();
@@ -166,23 +188,23 @@ impl App {
             None,
         );
 
-        self.wgpu_state = Some(WgpuState {
-            device,
-            queue,
+        self.surface_state = Some(SurfaceState {
             surface,
             surface_config,
         });
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
         self.popup_window = Some(window);
+        self.opened_at = Some(Instant::now());
         self.picker_state.reset();
     }
 
     fn close_popup(&mut self) {
         self.popup_window = None;
+        self.opened_at = None;
         self.egui_state = None;
         self.egui_renderer = None;
-        self.wgpu_state = None;
+        self.surface_state = None;
         self.picker_state.reset();
     }
 
@@ -190,7 +212,8 @@ impl App {
         let Some(window) = &self.popup_window else { return };
         let Some(egui_state) = &mut self.egui_state else { return };
         let Some(renderer) = &mut self.egui_renderer else { return };
-        let Some(wgpu) = &mut self.wgpu_state else { return };
+        let Some(surf) = &mut self.surface_state else { return };
+        let Some(gpu) = &self.gpu else { return };
 
         let raw_input = egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
@@ -204,27 +227,27 @@ impl App {
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [wgpu.surface_config.width, wgpu.surface_config.height],
+            size_in_pixels: [surf.surface_config.width, surf.surface_config.height],
             pixels_per_point: full_output.pixels_per_point,
         };
 
         for (id, delta) in &full_output.textures_delta.set {
-            renderer.update_texture(&wgpu.device, &wgpu.queue, *id, delta);
+            renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
         }
 
-        let mut encoder = wgpu
+        let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui_enc") });
 
         renderer.update_buffers(
-            &wgpu.device,
-            &wgpu.queue,
+            &gpu.device,
+            &gpu.queue,
             &mut encoder,
             &clipped_prims,
             &screen_descriptor,
         );
 
-        let surface_texture = match wgpu.surface.get_current_texture() {
+        let surface_texture = match surf.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Surface texture error: {e}");
@@ -259,7 +282,7 @@ impl App {
         renderer.render(&mut render_pass, &clipped_prims, &screen_descriptor);
         drop(render_pass);
 
-        wgpu.queue.submit(std::iter::once(encoder.finish()));
+        gpu.queue.submit(std::iter::once(encoder.finish()));
         surface_texture.present();
 
         for id in &full_output.textures_delta.free {
@@ -306,8 +329,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => {
-                // Close popup when it loses focus.
-                self.close_popup();
+                // Close popup when it loses focus, but not during the initial
+                // activation grace period (macOS may briefly defocus when
+                // bringing a background app to the front).
+                let within_grace = self
+                    .opened_at
+                    .is_some_and(|t| t.elapsed().as_millis() < FOCUS_GRACE_MS);
+                if !within_grace {
+                    self.close_popup();
+                }
             }
             _ => {}
         }
@@ -336,8 +366,10 @@ impl ApplicationHandler for App {
         // Process tray events
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click { button_state: MouseButtonState::Down, .. } = ev {
-                // Left click on tray — open popup
-                if self.popup_window.is_none() {
+                // Left click on tray — toggle popup
+                if self.popup_window.is_some() {
+                    self.close_popup();
+                } else {
                     self.open_popup(event_loop);
                 }
             }

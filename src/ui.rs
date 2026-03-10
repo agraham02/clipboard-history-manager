@@ -12,6 +12,7 @@ pub struct PickerState {
     pub search_query: String,
     pub selected_index: usize,
     pub should_close: bool,
+    first_frame: bool,
     image_textures: HashMap<usize, egui::TextureHandle>,
 }
 
@@ -21,6 +22,7 @@ impl PickerState {
             search_query: String::new(),
             selected_index: 0,
             should_close: false,
+            first_frame: true,
             image_textures: HashMap::new(),
         }
     }
@@ -29,6 +31,7 @@ impl PickerState {
         self.search_query.clear();
         self.selected_index = 0;
         self.should_close = false;
+        self.first_frame = true;
         self.image_textures.clear();
     }
 }
@@ -75,25 +78,7 @@ pub fn render_picker(
 
             ui.add_space(8.0);
 
-            // -- Search bar --
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut state.search_query)
-                    .hint_text("Search…")
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Body),
-            );
-            // Auto-focus search bar on first frame.
-            if search_resp.gained_focus() || ctx.input(|i| i.key_pressed(egui::Key::Slash)) {
-                search_resp.request_focus();
-            }
-            // Make sure it gets focus when popup opens.
-            if state.search_query.is_empty() && !search_resp.has_focus() {
-                search_resp.request_focus();
-            }
-
-            ui.add_space(6.0);
-
-            // -- Filtered results --
+            // -- Filtered results (compute early so keyboard nav knows bounds) --
             let results = hist.search(&state.search_query);
             let result_count = results.len();
 
@@ -102,26 +87,41 @@ pub fn render_picker(
                 state.selected_index = result_count - 1;
             }
 
-            // -- Keyboard navigation (consume before rendering list) --
+            // -- Keyboard navigation (read raw events BEFORE TextEdit consumes them) --
             let mut enter_pressed = false;
-            ctx.input(|i| {
-                if i.key_pressed(egui::Key::ArrowDown) {
+            ctx.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                     if result_count > 0 && state.selected_index + 1 < result_count {
                         state.selected_index += 1;
                     }
                 }
-                if i.key_pressed(egui::Key::ArrowUp) {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                     if state.selected_index > 0 {
                         state.selected_index -= 1;
                     }
                 }
-                if i.key_pressed(egui::Key::Enter) {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
                     enter_pressed = true;
                 }
-                if i.key_pressed(egui::Key::Escape) {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                     state.should_close = true;
                 }
             });
+
+            // -- Search bar --
+            let search_resp = ui.add(
+                egui::TextEdit::singleline(&mut state.search_query)
+                    .hint_text("Search…")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Body),
+            );
+            // Focus the search bar only on the first frame after popup opens.
+            if state.first_frame {
+                search_resp.request_focus();
+                state.first_frame = false;
+            }
+
+            ui.add_space(6.0);
 
             // -- Results list --
             let available_height = ui.available_height() - 28.0; // reserve footer space
@@ -143,6 +143,7 @@ pub fn render_picker(
                     } else {
                         for (list_idx, (orig_idx, entry, matched_indices)) in results.iter().enumerate() {
                             let is_selected = list_idx == state.selected_index;
+                            let item_id = egui::Id::new(("clip_item", list_idx));
 
                             let bg = if is_selected {
                                 egui::Color32::from_rgb(0x0A, 0x54, 0xA0)
@@ -237,9 +238,14 @@ pub fn render_picker(
                                 });
                             });
 
-                            // Click to select + copy
-                            if resp.response.interact(egui::Sense::click()).clicked() {
+                            // Click to select + copy — use a dedicated interact rect
+                            let click_resp = ui.interact(resp.response.rect, item_id, egui::Sense::click());
+                            if click_resp.clicked() {
                                 copied_index = Some(*orig_idx);
+                            }
+                            // Update selection on hover for visual feedback
+                            if click_resp.hovered() {
+                                state.selected_index = list_idx;
                             }
 
                             // Scroll selected item into view

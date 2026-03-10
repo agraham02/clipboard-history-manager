@@ -1,7 +1,7 @@
 [package]
 name = "clipboard-history-manager"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 arboard = { version = "3", features = ["image-data"] }
@@ -17,5 +17,5 @@ sublime_fuzzy = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSResponder"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSResponder", "NSRunningApplication"] }
 objc2-foundation = "0.3"
