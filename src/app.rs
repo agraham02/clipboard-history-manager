@@ -35,6 +35,10 @@ pub struct App {
     // Popup window + per-window state
     popup_window: Option<Arc<Window>>,
     opened_at: Option<Instant>,
+    /// The app that was frontmost before we opened the popup, so we can
+    /// restore focus (and its fullscreen Space) when we close.
+    #[cfg(target_os = "macos")]
+    previous_app: Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -72,6 +76,8 @@ impl App {
             gpu: None,
             popup_window: None,
             opened_at: None,
+            #[cfg(target_os = "macos")]
+            previous_app: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
@@ -114,6 +120,15 @@ impl App {
 
         self.ensure_gpu();
 
+        // Save the currently-focused app so we can restore it (and its
+        // fullscreen Space) when the popup closes.
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::NSWorkspace;
+            let ws = NSWorkspace::sharedWorkspace();
+            self.previous_app = ws.frontmostApplication();
+        }
+
         let attrs = Window::default_attributes()
             .with_title("Clipboard History")
             .with_inner_size(LogicalSize::new(POPUP_WIDTH, POPUP_HEIGHT))
@@ -140,19 +155,26 @@ impl App {
                         use objc2_app_kit::{NSApplication, NSView, NSWindowCollectionBehavior};
                         use objc2::MainThreadMarker;
 
-                        // The handle provides ns_view; get the window from it.
                         let ns_view_ptr = appkit.ns_view.as_ptr() as *mut NSView;
                         let ns_view = &*ns_view_ptr;
                         if let Some(ns_window) = ns_view.window() {
+                            // MoveToActiveSpace: moves the window TO the user's
+                            // current Space (including fullscreen ones) instead
+                            // of switching Spaces back to the desktop.
+                            // FullScreenAuxiliary: allows coexistence with a
+                            // fullscreen window on the same Space.
                             ns_window.setCollectionBehavior(
-                                NSWindowCollectionBehavior::CanJoinAllSpaces
+                                NSWindowCollectionBehavior::MoveToActiveSpace
                                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
                             );
-                            // Force the window to become key and front-most.
+                            // PopUpMenu level (101) floats above fullscreen apps.
+                            ns_window.setLevel(101);
+                            // Prevent the window from hiding when another app activates.
+                            ns_window.setHidesOnDeactivate(false);
                             ns_window.makeKeyAndOrderFront(None);
                         }
 
-                        // Activate the app so it comes to the foreground reliably.
+                        // Activate the app so we can receive keyboard input.
                         let mtm = MainThreadMarker::new_unchecked();
                         let app = NSApplication::sharedApplication(mtm);
                         #[allow(deprecated)]
@@ -206,6 +228,19 @@ impl App {
         self.egui_renderer = None;
         self.surface_state = None;
         self.picker_state.reset();
+
+        // Reactivate the previously-focused app so macOS switches back
+        // to its Space (including fullscreen Spaces).
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(prev) = self.previous_app.take() {
+                use objc2_app_kit::NSApplicationActivationOptions;
+                #[allow(deprecated)]
+                prev.activateWithOptions(
+                    NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+                );
+            }
+        }
     }
 
     fn render_egui(&mut self) {
