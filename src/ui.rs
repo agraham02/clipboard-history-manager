@@ -89,15 +89,18 @@ pub fn render_picker(
 
             // -- Keyboard navigation (read raw events BEFORE TextEdit consumes them) --
             let mut enter_pressed = false;
+            let mut keyboard_nav = false;
             ctx.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
                     if result_count > 0 && state.selected_index + 1 < result_count {
                         state.selected_index += 1;
+                        keyboard_nav = true;
                     }
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                     if state.selected_index > 0 {
                         state.selected_index -= 1;
+                        keyboard_nav = true;
                     }
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
@@ -243,13 +246,8 @@ pub fn render_picker(
                             if click_resp.clicked() {
                                 copied_index = Some(*orig_idx);
                             }
-                            // Update selection on hover for visual feedback
-                            if click_resp.hovered() {
-                                state.selected_index = list_idx;
-                            }
-
-                            // Scroll selected item into view
-                            if is_selected {
+                            // Scroll selected item into view only on keyboard nav
+                            if is_selected && keyboard_nav {
                                 resp.response.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
