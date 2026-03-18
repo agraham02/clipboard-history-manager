@@ -84,4 +84,11 @@ impl ClipboardHistory {
             }
         }
     }
+
+    /// Remove an entry at `index`.
+    pub fn remove(&mut self, index: usize) {
+        if index < self.items.len() {
+            self.items.remove(index);
+        }
+    }
 }

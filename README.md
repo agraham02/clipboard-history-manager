@@ -12,11 +12,13 @@ A lightweight clipboard history manager for macOS, built in Rust. Runs as a menu
 - **System tray** — Menu bar icon with quick access to show, clear history, or quit
 - **Fullscreen overlay** — Picker window floats over fullscreen apps (macOS)
 - **Focus restore** — Automatically returns focus to the previous app after pasting
+- **Auto-paste** — Simulates `Cmd+V` after selecting an item, so it pastes instantly into the target app
 
 ## Requirements
 
 - macOS (uses native AppKit APIs for fullscreen overlay and focus management)
 - Rust 1.85+ (edition 2021)
+- **Accessibility permission** — Required for auto-paste (`Cmd+V` simulation). The app will prompt on first launch; grant access in **System Settings → Privacy & Security → Accessibility**.
 
 ## Build
 
@@ -81,6 +83,9 @@ cat > ~/Applications/ClipboardHistoryManager.app/Contents/Info.plist << 'EOF'
 </dict>
 </plist>
 EOF
+
+# Ad-hoc codesign so macOS can track Accessibility permissions across rebuilds
+codesign -f -s - ~/Applications/ClipboardHistoryManager.app
 ```
 
 ### Run on Startup
@@ -92,9 +97,14 @@ EOF
 ### Update After Rebuilding
 
 ```bash
-cargo build --release && cp target/release/clipboard-history-manager \
-  ~/Applications/ClipboardHistoryManager.app/Contents/MacOS/ClipboardHistoryManager
+cargo build --release && \
+  cp target/release/clipboard-history-manager \
+    ~/Applications/ClipboardHistoryManager.app/Contents/MacOS/ClipboardHistoryManager && \
+  codesign -f -s - ~/Applications/ClipboardHistoryManager.app && \
+  tccutil reset Accessibility com.ahmadgraham.clipboard-history-manager
 ```
+
+After updating, re-grant **Accessibility** permission in System Settings → Privacy & Security → Accessibility (the rebuild invalidates the previous grant).
 
 ## Usage
 

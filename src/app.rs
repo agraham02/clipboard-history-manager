@@ -19,36 +19,119 @@ use crate::ui::PickerState;
 const HOTKEY_DEBOUNCE_MS: u128 = 250;
 const FOCUS_GRACE_MS: u128 = 400;
 
-/// Simulate Cmd+V keypress using macOS CGEvent API to paste into the
-/// previously-focused application.
+/// Check whether the app has macOS Accessibility permission (required for
+/// CGEvent-based keystroke simulation). If not granted, opens the System
+/// Settings pane so the user can enable it.
+#[cfg(target_os = "macos")]
+fn check_accessibility() {
+    use std::ffi::c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            c_str: *const u8,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+        static kCFBooleanTrue: *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+    }
+
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    }
+
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
+
+    unsafe {
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            b"AXTrustedCheckOptionPrompt\0".as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        let keys = [key];
+        let values = [kCFBooleanTrue];
+        let dict = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            &kCFTypeDictionaryKeyCallBacks as *const _ as *const c_void,
+            &kCFTypeDictionaryValueCallBacks as *const _ as *const c_void,
+        );
+
+        let trusted = AXIsProcessTrustedWithOptions(dict);
+
+        CFRelease(dict);
+        CFRelease(key);
+
+        if !trusted {
+            eprintln!(
+                "⚠️  Accessibility access not granted — auto-paste will not work.\n\
+                 Grant permission in System Settings → Privacy & Security → Accessibility."
+            );
+        }
+    }
+}
+
+/// Simulate Cmd+V keypress using CoreGraphics keyboard events.
 #[cfg(target_os = "macos")]
 fn simulate_paste() {
-    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use std::ffi::c_void;
 
-    // Small delay to let the target app fully activate.
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *const c_void,
+            keycode: u16,
+            key_down: i32,
+        ) -> *mut c_void;
+        fn CGEventSetFlags(event: *mut c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *mut c_void);
+    }
 
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .expect("Failed to create CGEvent source");
+    #[allow(dead_code)]
+    unsafe fn cf_release(ptr: *mut c_void) {
+        extern "C" { fn CFRelease(cf: *const std::ffi::c_void); }
+        CFRelease(ptr as *const _);
+    }
 
-        // macOS virtual keycode 9 = 'V'
-        const V_KEY: CGKeyCode = 9;
+    const V_KEYCODE: u16 = 9;
+    const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x00100000;
+    const K_CG_HID_EVENT_TAP: u32 = 0;
 
-        let key_down = CGEvent::new_keyboard_event(source.clone(), V_KEY, true)
-            .expect("Failed to create key-down event");
-        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-        key_down.post(CGEventTapLocation::HID);
+    unsafe {
+        let key_down = CGEventCreateKeyboardEvent(std::ptr::null(), V_KEYCODE, 1);
+        if key_down.is_null() {
+            eprintln!("simulate_paste: failed to create key-down event");
+            return;
+        }
+        CGEventSetFlags(key_down, K_CG_EVENT_FLAG_MASK_COMMAND);
+        CGEventPost(K_CG_HID_EVENT_TAP, key_down);
+        cf_release(key_down);
 
-        let key_up = CGEvent::new_keyboard_event(source, V_KEY, false)
-            .expect("Failed to create key-up event");
-        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-        key_up.post(CGEventTapLocation::HID);
-    });
+        let key_up = CGEventCreateKeyboardEvent(std::ptr::null(), V_KEYCODE, 0);
+        if key_up.is_null() {
+            eprintln!("simulate_paste: failed to create key-up event");
+            return;
+        }
+        CGEventSetFlags(key_up, K_CG_EVENT_FLAG_MASK_COMMAND);
+        CGEventPost(K_CG_HID_EVENT_TAP, key_up);
+        cf_release(key_up);
+    }
 }
-const POPUP_WIDTH: u32 = 760;
-const POPUP_HEIGHT: u32 = 480;
+const POPUP_WIDTH: u32 = 820;
+const POPUP_HEIGHT: u32 = 520;
 
 pub struct App {
     pub tray: Option<TrayState>,
@@ -64,6 +147,8 @@ pub struct App {
     // Popup window + per-window state
     popup_window: Option<Arc<Window>>,
     opened_at: Option<Instant>,
+    /// Whether to simulate Cmd+V after the popup is fully closed.
+    pending_paste: bool,
     /// The app that was frontmost before we opened the popup, so we can
     /// restore focus (and its fullscreen Space) when we close.
     #[cfg(target_os = "macos")]
@@ -111,6 +196,7 @@ impl App {
             gpu: None,
             popup_window: None,
             opened_at: None,
+            pending_paste: false,
             #[cfg(target_os = "macos")]
             previous_app: None,
             #[cfg(target_os = "macos")]
@@ -425,10 +511,6 @@ impl App {
         for id in &full_output.textures_delta.free {
             renderer.free_texture(id);
         }
-
-        if self.picker_state.should_close {
-            // Defer close to avoid borrow issues
-        }
     }
 }
 
@@ -438,6 +520,8 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::wait_duration(std::time::Duration::from_millis(100)));
         if self.tray.is_none() {
             self.tray = crate::tray::create_tray();
+            #[cfg(target_os = "macos")]
+            check_accessibility();
         }
     }
 
@@ -462,12 +546,10 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.render_egui();
                 if self.picker_state.should_close {
-                    let should_paste = self.picker_state.paste_on_close;
-                    self.close_popup();
-                    #[cfg(target_os = "macos")]
-                    if should_paste {
-                        simulate_paste();
+                    if self.picker_state.paste_on_close {
+                        self.pending_paste = true;
                     }
+                    self.close_popup();
                 }
             }
             WindowEvent::Focused(false) => {
@@ -537,6 +619,18 @@ impl ApplicationHandler for App {
         // Request continuous redraw while popup is open for smooth interaction.
         if let Some(w) = &self.popup_window {
             w.request_redraw();
+        }
+
+        // Fire deferred paste after popup is fully closed and previous app has focus.
+        #[cfg(target_os = "macos")]
+        if self.pending_paste && self.popup_window.is_none() {
+            self.pending_paste = false;
+            // Spawn a thread so the event loop can continue processing while
+            // we wait for the previous app to fully reactivate.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                simulate_paste();
+            });
         }
     }
 }

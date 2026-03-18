@@ -83,9 +83,10 @@ impl ClipboardEntry {
     }
 }
 
-const MAX_IMAGE_DIM: u32 = 256;
+const MAX_IMAGE_DIM: u32 = 4096;
 
 /// Downscale an image if either dimension exceeds MAX_IMAGE_DIM, preserving aspect ratio.
+/// Normal screenshots are stored at full resolution; only absurdly large images are capped.
 fn downscale_if_needed(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
     if width <= MAX_IMAGE_DIM && height <= MAX_IMAGE_DIM {
         return (rgba.to_vec(), width, height);
