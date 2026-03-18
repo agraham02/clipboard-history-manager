@@ -18,6 +18,35 @@ use crate::ui::PickerState;
 
 const HOTKEY_DEBOUNCE_MS: u128 = 250;
 const FOCUS_GRACE_MS: u128 = 400;
+
+/// Simulate Cmd+V keypress using macOS CGEvent API to paste into the
+/// previously-focused application.
+#[cfg(target_os = "macos")]
+fn simulate_paste() {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Small delay to let the target app fully activate.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .expect("Failed to create CGEvent source");
+
+        // macOS virtual keycode 9 = 'V'
+        const V_KEY: CGKeyCode = 9;
+
+        let key_down = CGEvent::new_keyboard_event(source.clone(), V_KEY, true)
+            .expect("Failed to create key-down event");
+        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_down.post(CGEventTapLocation::HID);
+
+        let key_up = CGEvent::new_keyboard_event(source, V_KEY, false)
+            .expect("Failed to create key-up event");
+        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_up.post(CGEventTapLocation::HID);
+    });
+}
 const POPUP_WIDTH: u32 = 760;
 const POPUP_HEIGHT: u32 = 480;
 
@@ -433,7 +462,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.render_egui();
                 if self.picker_state.should_close {
+                    let should_paste = self.picker_state.paste_on_close;
                     self.close_popup();
+                    #[cfg(target_os = "macos")]
+                    if should_paste {
+                        simulate_paste();
+                    }
                 }
             }
             WindowEvent::Focused(false) => {

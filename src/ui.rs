@@ -12,6 +12,7 @@ pub struct PickerState {
     pub search_query: String,
     pub selected_index: usize,
     pub should_close: bool,
+    pub paste_on_close: bool,
     first_frame: bool,
     image_textures: HashMap<usize, egui::TextureHandle>,
 }
@@ -22,6 +23,7 @@ impl PickerState {
             search_query: String::new(),
             selected_index: 0,
             should_close: false,
+            paste_on_close: false,
             first_frame: true,
             image_textures: HashMap::new(),
         }
@@ -31,6 +33,7 @@ impl PickerState {
         self.search_query.clear();
         self.selected_index = 0;
         self.should_close = false;
+        self.paste_on_close = false;
         self.first_frame = true;
         self.image_textures.clear();
     }
@@ -287,6 +290,7 @@ pub fn render_picker(
             }
         }
         state.should_close = true;
+        state.paste_on_close = true;
     }
 
     copied_index

@@ -19,3 +19,4 @@ sublime_fuzzy = "0.7"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
 objc2-foundation = "0.3"
+core-graphics = "0.24"
