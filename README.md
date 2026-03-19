@@ -20,35 +20,46 @@ A lightweight clipboard history manager for macOS, built in Rust. Runs as a menu
 - Rust 1.85+ (edition 2021)
 - **Accessibility permission** — Required for auto-paste (`Cmd+V` simulation). The app will prompt on first launch; grant access in **System Settings → Privacy & Security → Accessibility**.
 
-## Build
+## Install (for users)
+
+Download the latest `.dmg` from the releases, open it, and drag **Clipboard History Manager** into the Applications folder. That's it.
+
+On first launch:
+1. **Right-click → Open** (required once to bypass Gatekeeper on unsigned apps)
+2. Grant **Accessibility** permission when prompted (needed for auto-paste)
+
+### Run on Startup
+
+1. Open **System Settings** → **General** → **Login Items & Extensions**
+2. Click **+** under "Open at Login"
+3. Select **Clipboard History Manager** from Applications
+
+## Build from Source
+
+Requires Rust 1.85+ and macOS.
 
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
 cargo build --release
 ```
 
-The release binary is at `target/release/clipboard-history-manager`.
-
-## Run
+### Package a DMG for distribution
 
 ```bash
-cargo run
+# Generate the app icon (one-time)
+./packaging/generate_icon.sh
+
+# Build and package into a .dmg
+./packaging/package.sh
+
+# Or build a universal binary (Intel + Apple Silicon)
+./packaging/package.sh --universal
 ```
 
-Or run the release binary directly:
+The `.dmg` is created in `dist/`.
 
-```bash
-./target/release/clipboard-history-manager
-```
+### Developer Install (without DMG)
 
-The app will appear as a clipboard icon in your menu bar.
-
-## Install as a macOS App
-
-Create an app bundle so you can add it to Login Items:
+Create an app bundle for local use:
 
 ```bash
 # Build release binary
@@ -88,13 +99,19 @@ EOF
 codesign -f -s - ~/Applications/ClipboardHistoryManager.app
 ```
 
-### Run on Startup
-
-1. Open **System Settings** → **General** → **Login Items & Extensions**
-2. Click **+** under "Open at Login"
-3. Press `Cmd+Shift+G`, type `~/Applications`, and select **ClipboardHistoryManager.app**
-
 ### Update After Rebuilding
+
+If you installed from the **.dmg** (app lives in `/Applications/`):
+
+```bash
+cargo build --release && \
+  cp target/release/clipboard-history-manager \
+    /Applications/ClipboardHistoryManager.app/Contents/MacOS/ClipboardHistoryManager && \
+  codesign -f -s - /Applications/ClipboardHistoryManager.app && \
+  tccutil reset Accessibility com.ahmadgraham.clipboard-history-manager
+```
+
+If you used the **Developer Install** above (app lives in `~/Applications/`):
 
 ```bash
 cargo build --release && \

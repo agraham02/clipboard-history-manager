@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-use tray_icon::{MouseButtonState, TrayIconEvent};
+use tray_icon::TrayIconEvent;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -587,17 +587,8 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Process tray events
-        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click { button_state: MouseButtonState::Down, .. } = ev {
-                // Left click on tray — toggle popup
-                if self.popup_window.is_some() {
-                    self.close_popup();
-                } else {
-                    self.open_popup(event_loop);
-                }
-            }
-        }
+        // Drain tray icon events (menu handles all actions).
+        while TrayIconEvent::receiver().try_recv().is_ok() {}
 
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if let Some(tray) = &self.tray {
