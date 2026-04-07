@@ -224,6 +224,7 @@ impl App {
             ..Default::default()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
             ..Default::default()
         }))
         .expect("No suitable GPU adapter");
@@ -363,9 +364,11 @@ impl App {
         });
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
-        self.popup_window = Some(window);
+        self.popup_window = Some(window.clone());
         self.opened_at = Some(Instant::now());
         self.picker_state.reset();
+        // Trigger the first paint.
+        window.request_redraw();
     }
 
     fn close_popup(&mut self) {
@@ -516,8 +519,8 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Poll every 100ms so we always check for hotkey events even when no window is open.
-        event_loop.set_control_flow(ControlFlow::wait_duration(std::time::Duration::from_millis(100)));
+        // Sleep until an OS event arrives (hotkey, window, or proxy wake-up).
+        event_loop.set_control_flow(ControlFlow::Wait);
         if self.tray.is_none() {
             self.tray = crate::tray::create_tray();
             #[cfg(target_os = "macos")]
@@ -607,9 +610,12 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Request continuous redraw while popup is open for smooth interaction.
-        if let Some(w) = &self.popup_window {
-            w.request_redraw();
+        // Redraw only when the clipboard history has changed (dirty flag set
+        // by the poller thread, which also wakes the event loop via the proxy).
+        if self.dirty_flag.load(Ordering::Acquire) {
+            if let Some(w) = &self.popup_window {
+                w.request_redraw();
+            }
         }
 
         // Fire deferred paste after popup is fully closed and previous app has focus.

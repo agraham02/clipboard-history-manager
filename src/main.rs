@@ -14,18 +14,11 @@ use winit::event_loop::EventLoop;
 use crate::app::App;
 use crate::history::ClipboardHistory;
 
-const POLL_INTERVAL_SECONDS: u64 = 2;
+const POLL_INTERVAL_SECONDS: u64 = 3;
 
 fn main() {
     let history = Arc::new(Mutex::new(ClipboardHistory::new()));
     let dirty_flag = Arc::new(AtomicBool::new(false));
-
-    // Spawn background clipboard poller.
-    clipboard::spawn_poller(
-        history.clone(),
-        dirty_flag.clone(),
-        Duration::from_secs(POLL_INTERVAL_SECONDS),
-    );
 
     // Register global hotkey (Cmd+Shift+V).
     let Some((_hotkey_manager, hotkey)) = hotkey::setup_hotkey() else {
@@ -40,6 +33,17 @@ fn main() {
             return;
         }
     };
+
+    // Create a proxy so the clipboard poller thread can wake the event loop.
+    let proxy = event_loop.create_proxy();
+
+    // Spawn background clipboard poller.
+    clipboard::spawn_poller(
+        history.clone(),
+        dirty_flag.clone(),
+        Duration::from_secs(POLL_INTERVAL_SECONDS),
+        proxy,
+    );
 
     let mut app = App::new(history, dirty_flag, hotkey);
 

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arboard::{Clipboard, ImageData};
+use winit::event_loop::EventLoopProxy;
 
 use crate::history::ClipboardHistory;
 
@@ -117,35 +118,42 @@ pub fn spawn_poller(
     history: Arc<Mutex<ClipboardHistory>>,
     dirty_flag: Arc<AtomicBool>,
     interval: Duration,
+    proxy: EventLoopProxy<()>,
 ) {
     std::thread::spawn(move || {
         let mut last_text: Option<String> = None;
         let mut last_image_hash: Option<u64> = None;
+        let mut cb = Clipboard::new().ok();
         loop {
             std::thread::sleep(interval);
 
-            let mut cb = match Clipboard::new() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Clipboard unavailable: {e}");
-                    continue;
-                }
-            };
+            // Reuse the Clipboard handle; recreate only if missing.
+            if cb.is_none() {
+                cb = match Clipboard::new() {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("Clipboard unavailable: {e}");
+                        continue;
+                    }
+                };
+            }
+            let clipboard = cb.as_mut().unwrap();
 
             // Try text first
-            if let Ok(text) = cb.get_text() {
+            if let Ok(text) = clipboard.get_text() {
                 if !text.is_empty() && last_text.as_deref() != Some(&text) {
                     last_text = Some(text.clone());
                     if let Ok(mut h) = history.lock() {
                         h.push(ClipboardEntry::Text(text));
                         dirty_flag.store(true, Ordering::Release);
+                        let _ = proxy.send_event(());
                     }
                     continue;
                 }
             }
 
             // Then try image
-            if let Ok(img) = cb.get_image() {
+            if let Ok(img) = clipboard.get_image() {
                 // Simple hash to detect change without storing full previous image.
                 let hash = quick_hash(&img.bytes);
                 if last_image_hash != Some(hash) {
@@ -158,6 +166,7 @@ pub fn spawn_poller(
                     if let Ok(mut hist) = history.lock() {
                         hist.push(ClipboardEntry::Image { rgba, width: w, height: h });
                         dirty_flag.store(true, Ordering::Release);
+                        let _ = proxy.send_event(());
                     }
                 }
             }
